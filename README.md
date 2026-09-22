@@ -692,6 +692,63 @@ Read more in [this blog
 post](https://sagikazarmark.hu/blog/decoding-custom-formats-with-viper/).
 
 
+
+## Explaining Where a Value Comes From
+
+When a key is set in several places (defaults, config file, environment,
+flags, explicit `Set` calls), it can be hard to tell which source produced
+the final value. `Explain` and `ExplainAll` resolve a key through Viper's
+actual lookup logic and report the canonical key, the winning source, the
+final value, and every shadowed candidate:
+
+```go
+v := viper.New()
+v.SetDefault("port", 80)
+v.ReadConfig(strings.NewReader("port: 81")) // config file
+v.BindEnv("port", "APP_PORT")               // APP_PORT=82
+v.Set("port", 83)
+
+fmt.Print(v.Explain("port"))
+// key: port
+// value: 83 (source: override)
+//   - override: 83
+//   - env [APP_PORT]: 82
+//   - config: 81
+//   - default: 80
+```
+
+The explanation covers nested keys, custom key delimiters, aliases (chains
+are shown and cycles cannot hang the resolver), case normalization, env key
+replacers, and `AllowEmptyEnv` (an ignored empty variable is listed with a
+note). When a parent scalar shadows a nested map, the blocked candidates
+carry the exact shadowing location (e.g. `override:parent`).
+
+`ExplainAll` explains every known key and evaluates all of them against a
+single snapshot of the environment, so one call always yields a consistent
+view. Neither function triggers remote reads, file watchers, or decode
+hooks, and the returned values are deep copies that cannot mutate Viper's
+internal state.
+
+### Redacting sensitive keys
+
+Pass `WithSensitiveKeys` to redact a key and its entire subtree. Every
+candidate value is redacted, not just the winning one, so shadowed layers
+cannot leak secrets either:
+
+```go
+exp := v.Explain("secret.token", viper.WithSensitiveKeys("secret"))
+// exp.Value == viper.RedactedValue, and so is every candidate value
+```
+
+### Offline demo
+
+A self-contained demo (no network, finishes in a couple of seconds) prints
+two source chains plus a redaction counterexample:
+
+```shell
+go run ./examples/explain
+```
+
 ## FAQ
 
 ### Why is it called “Viper”?

@@ -1221,48 +1221,7 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) any {
 	// PFlag override next
 	flag, exists := v.pflags[lcaseKey]
 	if exists && flag.HasChanged() {
-		switch flag.ValueType() {
-		case "int", "int8", "int16", "int32", "int64":
-			return cast.ToInt(flag.ValueString())
-		case "bool":
-			return cast.ToBool(flag.ValueString())
-		case "stringSlice", "stringArray":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return res
-		case "boolSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToBoolSlice(res)
-		case "intSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToIntSlice(res)
-		case "uintSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToUintSlice(res)
-		case "float64Slice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToFloat64Slice(res)
-		case "durationSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			slice := strings.Split(s, ",")
-			return cast.ToDurationSlice(slice)
-		case "stringToString":
-			return stringToStringConv(flag.ValueString())
-		case "stringToInt":
-			return stringToIntConv(flag.ValueString())
-		default:
-			return flag.ValueString()
-		}
+		return flagToValue(flag)
 	}
 	if nested && v.isPathShadowedInFlatMap(path, v.pflags) != "" {
 		return nil
@@ -1323,53 +1282,60 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) any {
 		// last chance: if no value is found and a flag does exist for the key,
 		// get the flag's default value even if the flag's value has not been set.
 		if flag, exists := v.pflags[lcaseKey]; exists {
-			switch flag.ValueType() {
-			case "int", "int8", "int16", "int32", "int64":
-				return cast.ToInt(flag.ValueString())
-			case "bool":
-				return cast.ToBool(flag.ValueString())
-			case "stringSlice", "stringArray":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return res
-			case "boolSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToBoolSlice(res)
-			case "intSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToIntSlice(res)
-			case "uintSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToUintSlice(res)
-			case "float64Slice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToFloat64Slice(res)
-			case "stringToString":
-				return stringToStringConv(flag.ValueString())
-			case "stringToInt":
-				return stringToIntConv(flag.ValueString())
-			case "durationSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				slice := strings.Split(s, ",")
-				return cast.ToDurationSlice(slice)
-			default:
-				return flag.ValueString()
-			}
+			return flagToValue(flag)
 		}
 		// last item, no need to check shadowing
 	}
 
 	return nil
+}
+
+// flagToValue converts a flag's current string value to the type registered
+// for the flag. It is shared by find and Explain so both resolve flag values
+// exactly the same way.
+func flagToValue(flag FlagValue) any {
+	switch flag.ValueType() {
+	case "int", "int8", "int16", "int32", "int64":
+		return cast.ToInt(flag.ValueString())
+	case "bool":
+		return cast.ToBool(flag.ValueString())
+	case "stringSlice", "stringArray":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return res
+	case "boolSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToBoolSlice(res)
+	case "intSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToIntSlice(res)
+	case "uintSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToUintSlice(res)
+	case "float64Slice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToFloat64Slice(res)
+	case "durationSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		slice := strings.Split(s, ",")
+		return cast.ToDurationSlice(slice)
+	case "stringToString":
+		return stringToStringConv(flag.ValueString())
+	case "stringToInt":
+		return stringToIntConv(flag.ValueString())
+	default:
+		return flag.ValueString()
+	}
 }
 
 func readAsCSV(val string) ([]string, error) {
