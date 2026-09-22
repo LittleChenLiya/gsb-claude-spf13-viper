@@ -692,6 +692,54 @@ Read more in [this blog
 post](https://sagikazarmark.hu/blog/decoding-custom-formats-with-viper/).
 
 
+## Explaining where a value comes from
+
+When several sources define the same key, it can be hard to tell which one
+wins. `Explain` traces a single key through Viper's actual lookup order
+(override > flag > env > config > key/value store > default) and reports the
+canonical key, the winning source, the effective value, and every shadowed
+candidate. `ExplainAll` does the same for every known key, using a single
+environment snapshot for the whole result.
+
+```go
+v := viper.New()
+v.SetDefault("port", 80)
+// ... config file sets port: 81, env PORT=82 ...
+v.Set("port", 83)
+
+exp := v.Explain("port")
+fmt.Println(exp.Source, exp.Value) // override 83
+for _, c := range exp.Candidates {
+	fmt.Println(c.Source, c.Value, c.Winner)
+}
+```
+
+Nested keys, aliases, case normalization, env key replacers, `AllowEmptyEnv`,
+and custom key delimiters are all resolved the same way `Get` resolves them.
+When a parent scalar shadows a nested map (e.g. `Set("app", "scalar")` while
+the config file has `app.port`), the explanation's `BlockedBy`/`BlockedAt`
+fields point at the exact key and source doing the shadowing.
+
+Sensitive keys (and their whole subtree) can be masked so that no candidate
+value leaks, not just the winning one:
+
+```go
+exp := v.Explain("db.password", viper.WithSensitiveKeys("db"))
+fmt.Println(exp.Value) // ***
+```
+
+`Explain` never triggers remote reads, config watchers, or decoding hooks,
+and all returned values are deep copies, so mutating an explanation cannot
+change Viper's internal state.
+
+Two runnable, offline demos (a full source chain and a masking example) ship
+as Go examples and complete in well under 90 seconds:
+
+```shell
+go test -run 'ExampleViper_Explain' -v .
+```
+
+
 ## FAQ
 
 ### Why is it called “Viper”?

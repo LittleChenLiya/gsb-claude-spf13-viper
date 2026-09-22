@@ -414,13 +414,27 @@ func (v *Viper) AllowEmptyEnv(allowEmptyEnv bool) {
 // key. This allows env vars which have different keys than the config object
 // keys.
 func (v *Viper) getEnv(key string) (string, bool) {
+	return v.getEnvWith(key, os.LookupEnv)
+}
+
+// getEnvWith is getEnv with a caller-provided environment lookup function,
+// allowing callers (e.g. Explain) to evaluate against a consistent snapshot
+// of the environment instead of the live one.
+func (v *Viper) getEnvWith(key string, lookup func(string) (string, bool)) (string, bool) {
+	key = v.envVarName(key)
+
+	val, ok := lookup(key)
+
+	return val, ok && (v.allowEmptyEnv || val != "")
+}
+
+// envVarName applies the env key replacer, if any, to the given key.
+func (v *Viper) envVarName(key string) string {
 	if v.envKeyReplacer != nil {
 		key = v.envKeyReplacer.Replace(key)
 	}
 
-	val, ok := os.LookupEnv(key)
-
-	return val, ok && (v.allowEmptyEnv || val != "")
+	return key
 }
 
 // ConfigFileUsed returns the file used to populate the config registry.
@@ -647,10 +661,16 @@ func (v *Viper) isPathShadowedInFlatMap(path []string, mi any) string {
 //
 //	"foo.bar.baz" in a lower-priority map
 func (v *Viper) isPathShadowedInAutoEnv(path []string) string {
+	return v.isPathShadowedInAutoEnvWith(path, os.LookupEnv)
+}
+
+// isPathShadowedInAutoEnvWith is isPathShadowedInAutoEnv with a
+// caller-provided environment lookup function.
+func (v *Viper) isPathShadowedInAutoEnvWith(path []string, lookup func(string) (string, bool)) string {
 	var parentKey string
 	for i := 1; i < len(path); i++ {
 		parentKey = strings.Join(path[0:i], v.keyDelim)
-		if _, ok := v.getEnv(v.mergeWithEnvPrefix(parentKey)); ok {
+		if _, ok := v.getEnvWith(v.mergeWithEnvPrefix(parentKey), lookup); ok {
 			return parentKey
 		}
 	}
@@ -1221,48 +1241,7 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) any {
 	// PFlag override next
 	flag, exists := v.pflags[lcaseKey]
 	if exists && flag.HasChanged() {
-		switch flag.ValueType() {
-		case "int", "int8", "int16", "int32", "int64":
-			return cast.ToInt(flag.ValueString())
-		case "bool":
-			return cast.ToBool(flag.ValueString())
-		case "stringSlice", "stringArray":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return res
-		case "boolSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToBoolSlice(res)
-		case "intSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToIntSlice(res)
-		case "uintSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToUintSlice(res)
-		case "float64Slice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToFloat64Slice(res)
-		case "durationSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			slice := strings.Split(s, ",")
-			return cast.ToDurationSlice(slice)
-		case "stringToString":
-			return stringToStringConv(flag.ValueString())
-		case "stringToInt":
-			return stringToIntConv(flag.ValueString())
-		default:
-			return flag.ValueString()
-		}
+		return flagValue(flag)
 	}
 	if nested && v.isPathShadowedInFlatMap(path, v.pflags) != "" {
 		return nil
@@ -1323,53 +1302,59 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) any {
 		// last chance: if no value is found and a flag does exist for the key,
 		// get the flag's default value even if the flag's value has not been set.
 		if flag, exists := v.pflags[lcaseKey]; exists {
-			switch flag.ValueType() {
-			case "int", "int8", "int16", "int32", "int64":
-				return cast.ToInt(flag.ValueString())
-			case "bool":
-				return cast.ToBool(flag.ValueString())
-			case "stringSlice", "stringArray":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return res
-			case "boolSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToBoolSlice(res)
-			case "intSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToIntSlice(res)
-			case "uintSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToUintSlice(res)
-			case "float64Slice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToFloat64Slice(res)
-			case "stringToString":
-				return stringToStringConv(flag.ValueString())
-			case "stringToInt":
-				return stringToIntConv(flag.ValueString())
-			case "durationSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				slice := strings.Split(s, ",")
-				return cast.ToDurationSlice(slice)
-			default:
-				return flag.ValueString()
-			}
+			return flagValue(flag)
 		}
 		// last item, no need to check shadowing
 	}
 
 	return nil
+}
+
+// flagValue converts a flag's string value to its typed representation,
+// mirroring the conversion logic used by Viper's lookup.
+func flagValue(flag FlagValue) any {
+	switch flag.ValueType() {
+	case "int", "int8", "int16", "int32", "int64":
+		return cast.ToInt(flag.ValueString())
+	case "bool":
+		return cast.ToBool(flag.ValueString())
+	case "stringSlice", "stringArray":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return res
+	case "boolSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToBoolSlice(res)
+	case "intSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToIntSlice(res)
+	case "uintSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToUintSlice(res)
+	case "float64Slice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToFloat64Slice(res)
+	case "durationSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		slice := strings.Split(s, ",")
+		return cast.ToDurationSlice(slice)
+	case "stringToString":
+		return stringToStringConv(flag.ValueString())
+	case "stringToInt":
+		return stringToIntConv(flag.ValueString())
+	default:
+		return flag.ValueString()
+	}
 }
 
 func readAsCSV(val string) ([]string, error) {
