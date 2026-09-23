@@ -183,6 +183,91 @@ viper.OnConfigChange(func(e fsnotify.Event) {
 viper.WatchConfig()
 ```
 
+### Explicit Snapshot Build and Publish
+
+Sometimes you want to validate an entirely new configuration *before* any
+reader can observe it. `SnapshotPublisher` provides an explicit
+build/validate/publish flow over a fully configured `*Viper` instance:
+
+```go
+validate := func(s *viper.Snapshot) error {
+    if s.GetInt("port") <= 0 {
+        return fmt.Errorf("invalid port: %d", s.GetInt("port"))
+    }
+    return nil
+}
+
+publisher, err := viper.NewSnapshotPublisher(v, validate)
+if err != nil {
+    log.Fatal(err)
+}
+defer publisher.Close()
+
+// Readers always observe one complete, immutable version.
+go func() {
+    for {
+        snap := publisher.Load()
+        serveWith(snap)
+    }
+}()
+
+// On reload: build a candidate from current effective config, then publish
+// it only if validation passes.
+candidate, err := publisher.Build(ctx)
+if err != nil {
+    return err // ctx canceled (or publisher closed)
+}
+if _, err := candidate.Publish(ctx); err != nil {
+    return err // validation failed: the old snapshot stays fully in place
+}
+```
+
+Properties of the flow:
+
+- `NewSnapshotPublisher` builds, validates, and publishes the initial
+  snapshot as version 1.
+- `Build` samples the Viper precedence chain (override, flag, env, config,
+  kvstore, default) exactly once, including environment variables, and
+  returns a deep-copied candidate. Later changes to environment variables or
+  to nested maps/slices cannot reach the candidate.
+- `Publish` runs the validation callback **without** holding the publish
+  lock. Validation failure, context cancellation, or a stale generation
+  leaves the old snapshot and its version untouched; fields are never
+  updated one by one.
+- Each `Build` gets a monotonic generation. A candidate whose generation is
+  older than the already published one fails `Publish` with
+  `ErrStaleSnapshotGeneration`, so a slow older reload can never roll a
+  newer snapshot back.
+- Every successful publish increments the version by one.
+- `Load` never blocks and returns an immutable snapshot: `Get` and
+  `Unmarshal` read only that snapshot, and nested maps and slices returned
+  to callers are independent copies. Snapshots obtained from `Load` stay
+  readable after later publishes and even after `Close`.
+- `Close` rejects new `Build` and `Publish` calls
+  (`ErrSnapshotPublisherClosed`), but does not invalidate existing
+  snapshots.
+
+`SnapshotPublisher` does not change the `WatchConfig`/`OnConfigChange`
+behavior above; the application decides when a file notification should
+produce a candidate. Wire it up inside the change callback:
+
+```go
+viper.OnConfigChange(func(e fsnotify.Event) {
+    candidate, err := publisher.Build(ctx)
+    if err != nil {
+        log.Printf("build snapshot: %v", err)
+        return
+    }
+    if _, err := candidate.Publish(ctx); err != nil {
+        log.Printf("reject new config, keeping version %d: %v",
+            publisher.Load().Version(), err)
+        return
+    }
+})
+
+viper.WatchConfig()
+```
+
 ### Reading Config from `io.Reader`
 
 Viper predefines many configuration sources but you can also implement your own
