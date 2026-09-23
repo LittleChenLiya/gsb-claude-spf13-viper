@@ -183,6 +183,70 @@ viper.OnConfigChange(func(e fsnotify.Event) {
 viper.WatchConfig()
 ```
 
+### Publishing Validated Config Snapshots
+
+For hot reloads where readers must never observe a half-applied or invalid
+configuration, Viper offers an explicit snapshot publisher. A candidate
+snapshot is built from a fully configured Viper instance, validated as a
+whole, and only then published to readers atomically.
+
+```go
+v := viper.New()
+// ... configure v as usual (files, env, flags, defaults) ...
+
+publisher, err := viper.NewPublisher(v, func(settings map[string]any) error {
+	if port, ok := settings["port"].(int); !ok || port < 0 {
+		return fmt.Errorf("invalid port: %v", settings["port"])
+	}
+	return nil
+})
+if err != nil {
+	log.Fatal(err)
+}
+defer publisher.Close()
+```
+
+Readers load the current immutable snapshot; every successful publish
+increments its version:
+
+```go
+snap := publisher.Load() // safe for concurrent use
+host := snap.GetString("host")
+var cfg Config
+err := snap.Unmarshal(&cfg)
+```
+
+The publisher deliberately does not hook into WatchConfig: the application
+decides when to rebuild. Wire the file notification to an explicit
+build/validate/publish cycle yourself:
+
+```go
+v.OnConfigChange(func(e fsnotify.Event) {
+	candidate, err := publisher.Build(context.Background())
+	if err != nil {
+		return // publisher closed or context cancelled
+	}
+	if _, err := candidate.Publish(context.Background()); err != nil {
+		// Validation failed or a newer generation won the race:
+		// the previously published snapshot stays fully intact.
+		log.Printf("config update rejected: %v", err)
+	}
+})
+v.WatchConfig()
+```
+
+Guarantees:
+
+- Build deep-copies the effective settings (including nested maps and
+  slices) and samples environment variables exactly once, at build time.
+- Validation runs without holding the publish lock, and a rejected
+  candidate leaves the old snapshot and version untouched — fields never
+  update partially.
+- Generations are assigned at build time; an older candidate that finishes
+  after a newer one was published is rejected instead of overwriting it.
+- After Close, new builds and publishes fail, while snapshots already
+  handed out remain readable.
+
 ### Reading Config from `io.Reader`
 
 Viper predefines many configuration sources but you can also implement your own
