@@ -152,6 +152,15 @@ type Viper struct {
 
 	experimentalFinder     bool
 	experimentalBindStruct bool
+
+	// Reference expansion layer (opt-in, see refs.go). refCache holds expanded
+	// values between calls and is discarded whenever a value-bearing register
+	// changes. refResolveCount counts actual (uncached) key resolutions and is
+	// used by tests to verify that identical references resolve only once.
+	refCache        map[string]*refCacheEntry
+	refMaxDepth     int
+	refResolveCount int
+	sensitivePaths  map[string]struct{}
 }
 
 // New returns an initialized Viper instance.
@@ -1471,6 +1480,7 @@ func RegisterAlias(alias, key string) { v.RegisterAlias(alias, key) }
 // This enables one to change a name without breaking the application.
 func (v *Viper) RegisterAlias(alias, key string) {
 	v.registerAlias(alias, strings.ToLower(key))
+	v.invalidateRefCache()
 }
 
 func (v *Viper) registerAlias(alias, key string) {
@@ -1541,6 +1551,7 @@ func (v *Viper) SetDefault(key string, value any) {
 	// If alias passed in, then set the proper default
 	key = v.realKey(strings.ToLower(key))
 	value = toCaseInsensitiveValue(value)
+	v.invalidateRefCache()
 
 	path := strings.Split(key, v.keyDelim)
 	lastKey := strings.ToLower(path[len(path)-1])
@@ -1564,6 +1575,7 @@ func (v *Viper) Set(key string, value any) {
 	// If alias passed in, then set the proper override
 	key = v.realKey(strings.ToLower(key))
 	value = toCaseInsensitiveValue(value)
+	v.invalidateRefCache()
 
 	path := strings.Split(key, v.keyDelim)
 	lastKey := strings.ToLower(path[len(path)-1])
@@ -1609,6 +1621,7 @@ func (v *Viper) ReadInConfig() error {
 	}
 
 	v.config = config
+	v.invalidateRefCache()
 	return nil
 }
 
@@ -1650,6 +1663,7 @@ func (v *Viper) ReadConfig(in io.Reader) error {
 	}
 
 	v.config = config
+	v.invalidateRefCache()
 
 	return nil
 }
@@ -1680,6 +1694,7 @@ func (v *Viper) MergeConfigMap(cfg map[string]any) error {
 	}
 	insensitiviseMap(cfg)
 	mergeMaps(cfg, v.config, nil)
+	v.invalidateRefCache()
 	return nil
 }
 

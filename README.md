@@ -547,6 +547,80 @@ returned instead.
 GetString("datastore.metric.host") // "0.0.0.0"
 ```
 
+### Configuration References
+
+Viper can expand references between configuration values. Reference expansion
+is an explicit, opt-in layer: the plain `Get` family never expands references.
+Use `GetExpanded` to resolve a key with expansion enabled:
+
+```yaml
+host: example.com
+port: 8080
+url: "http://${host}:${port}/api"
+servers:
+  - alpha
+  - beta
+primary: "${servers}"
+```
+
+```go
+v.GetExpanded("url")     // "http://example.com:8080/api"
+v.GetExpanded("primary") // []any{"alpha", "beta"} (a list stays a list)
+```
+
+References use the syntax `${path.to.key}`. The raw value is selected with
+Viper's normal precedence (override, flag, env, config, key/value store,
+default) first, and references are expanded afterwards, so a reference always
+sees the final raw value of its target (including environment overrides).
+
+Two forms are supported:
+
+- **Whole-value reference**: when the value consists of a single reference,
+  the referenced value keeps its original type. A list stays a list, a map
+  stays a map.
+- **Interpolated reference**: references embedded in a larger string are
+  rendered as text and may only target scalar values (strings, numbers,
+  booleans, ...). Embedding a map or a slice in a string is an error.
+
+Write a literal reference by doubling the dollar sign: `$${literal}` expands
+to the text `${literal}`.
+
+Failures are reported as structured errors that contain the dependency chain
+but never any referenced values:
+
+```go
+_, err := v.GetExpanded("a")
+var cycleErr viper.ReferenceCycleError
+if errors.As(err, &cycleErr) {
+	fmt.Println(cycleErr.ReferenceChain()) // [a b a]
+}
+```
+
+`ReferenceCycleError` reports closed loops (`a -> b -> a`),
+`ReferenceMissingError` reports targets without a value,
+`ReferenceNonScalarError` reports collections embedded in strings, and
+`ReferenceDepthError` reports chains deeper than the maximum depth
+(configurable with `SetReferenceMaxDepth`, default 32).
+
+Expansion results are cached and the cache is invalidated automatically when
+values change (`Set`, `SetDefault`, `ReadConfig`, `MergeConfig`, ...).
+
+#### Sensitive paths and safe diagnostics
+
+Mark paths that hold secrets with `MarkSensitive`. Sensitivity propagates
+along references: anything depending on a sensitive path is sensitive too.
+`ExplainReferences` returns diagnostics containing only paths, the precedence
+layer that supplied each value, dependencies and sensitivity — never values —
+so it is safe to log or display:
+
+```go
+v.MarkSensitive("db.password")
+diags, err := v.ExplainReferences("db.dsn")
+// diags[i] has Path, Source ("override", "flag", "env", "config", ...),
+// Sensitive and Dependencies. Expanded values are never included.
+```
+
+
 ### Configuration Subsets
 
 It's often useful to extract a subset of configuration (e.g., when developing a
