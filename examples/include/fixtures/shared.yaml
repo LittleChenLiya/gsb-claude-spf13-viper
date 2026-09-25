@@ -1,0 +1,5 @@
+# Shared by both a.yaml and b.yaml. It is read only once per load.
+id: shared
+name: shared
+nested:
+  source: shared

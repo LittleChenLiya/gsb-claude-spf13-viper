@@ -1,0 +1,6 @@
+include:
+  - shared.yaml
+id: b
+name: b
+nested:
+  source: b

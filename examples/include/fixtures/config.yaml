@@ -1,0 +1,6 @@
+include:
+  - a.yaml
+  - b.yaml
+id: root
+name: root
+title: Include demo

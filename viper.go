@@ -152,6 +152,9 @@ type Viper struct {
 
 	experimentalFinder     bool
 	experimentalBindStruct bool
+	experimentalInclude    bool
+	includeMaxDepth        int
+	includeMaxFiles        int
 }
 
 // New returns an initialized Viper instance.
@@ -179,6 +182,8 @@ func New() *Viper {
 
 	v.experimentalFinder = features.Finder
 	v.experimentalBindStruct = features.BindStruct
+	v.includeMaxDepth = DefaultIncludeMaxDepth
+	v.includeMaxFiles = DefaultIncludeMaxFiles
 
 	return v
 }
@@ -1592,6 +1597,19 @@ func (v *Viper) ReadInConfig() error {
 
 	v.logger.Debug("reading file", "file", filename)
 
+	if v.experimentalInclude {
+		config, err := v.readConfigWithIncludes(filename)
+		if err != nil {
+			return err
+		}
+
+		// Replace the previous configuration only after every file layer has
+		// been parsed successfully.
+		v.config = config
+
+		return nil
+	}
+
 	file, err := afero.ReadFile(v.fs, filename)
 	if errors.Is(err, fs.ErrNotExist) {
 		// The specified config file is missing
@@ -1625,6 +1643,15 @@ func (v *Viper) MergeInConfig() error {
 
 	if !slices.Contains(SupportedExts, v.getConfigType()) {
 		return UnsupportedConfigError(v.getConfigType())
+	}
+
+	if v.experimentalInclude {
+		config, err := v.readConfigWithIncludes(filename)
+		if err != nil {
+			return err
+		}
+
+		return v.MergeConfigMap(config)
 	}
 
 	file, err := afero.ReadFile(v.fs, filename)
@@ -1784,6 +1811,13 @@ func (v *Viper) unmarshalReader(in io.Reader, c map[string]any) error {
 		return errors.New("cannot decode configuration: unable to determine config type")
 	}
 
+	return v.decodeConfigBytes(in, format, c, true)
+}
+
+// decodeConfigBytes decodes configuration data in the given format into c.
+// When insensitive is false the decoded keys are not lower-cased, which
+// allows callers to inspect the original key names.
+func (v *Viper) decodeConfigBytes(in io.Reader, format string, c map[string]any, insensitive bool) error {
 	buf := new(bytes.Buffer)
 	_, err := buf.ReadFrom(in)
 	if err != nil {
@@ -1807,7 +1841,10 @@ func (v *Viper) unmarshalReader(in io.Reader, c map[string]any) error {
 		return ConfigParseError{err}
 	}
 
-	insensitiviseMap(c)
+	if insensitive {
+		insensitiviseMap(c)
+	}
+
 	return nil
 }
 

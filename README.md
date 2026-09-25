@@ -141,6 +141,85 @@ if err := viper.ReadInConfig(); err != nil {
 > specify the format programmatically, which is useful for files that naturally
 > have no extension (e.g., `.bashrc`).
 
+### Including Local Config Files
+
+Local includes are an experimental, opt-in feature enabled with the
+`viper.ExperimentalInclude()` option. When enabled, a configuration file can
+declare other local files to include using the top-level `include` key:
+
+```yaml
+# config.yaml
+include:
+  - a.yaml
+  - b.yaml
+name: root
+```
+
+Included files are merged first, in declaration order, followed by the file
+that declares them, so the current file always wins. With `a.yaml` and
+`b.yaml` both including `shared.yaml`, the effective order is:
+
+```text
+shared.yaml -> a.yaml -> shared.yaml (cached) -> b.yaml -> config.yaml
+```
+
+Properties of the loader:
+
+* Include paths are relative to the file that declares them (absolute paths
+  are also accepted).
+* A file referenced twice by siblings is parsed and read from disk only once
+  per load. The cache is per load, so the next `ReadInConfig` reads the
+  current file contents again.
+* The same canonical path appearing twice along one recursive chain is an
+  include cycle; referencing it from separate branches is not.
+* Include depth and the total number of files are limited. Defaults are
+  `viper.DefaultIncludeMaxDepth` (10) and `viper.DefaultIncludeMaxFiles`
+  (64); override them with `viper.IncludeLimits(maxDepth, maxFiles)`.
+* Errors are returned as `viper.IncludeError`, whose `Chain` field lists the
+  full include path from the root file to the file that failed. Specific
+  causes are available as `viper.IncludeCycleError`,
+  `viper.IncludeDepthError`, `viper.IncludeFileCountError` and
+  `viper.IncludeKeyConflictError` (use `errors.As`).
+* Declaring both `include` and `Include` (or any other case variant) in the
+  same file is an error because Viper keys are case-insensitive.
+* The whole file tree must parse successfully before the previous
+  configuration is replaced; on failure the old values remain available.
+* The `include` key itself is removed and never becomes a configuration
+  value. Environment variables, flags and `Set` overrides keep their normal,
+  higher precedence.
+
+```go
+v := viper.NewWithOptions(
+    viper.ExperimentalInclude(),
+    viper.IncludeLimits(8, 32),
+)
+v.SetConfigFile("config.yaml")
+
+if err := v.ReadInConfig(); err != nil {
+    var includeErr viper.IncludeError
+    if errors.As(err, &includeErr) {
+        // includeErr.Chain contains the full include chain
+    }
+
+    panic(err)
+}
+```
+
+The included files may use any supported format. The format is taken from the
+included file's extension, falling back to the configured type for
+extension-less files. Includes also apply to `MergeInConfig`. They do not
+apply when reading from an `io.Reader` via `ReadConfig`, because there is no
+declaring file to resolve relative paths against.
+
+A runnable example with local fixtures lives in
+[`examples/include`](examples/include). The following command prints the
+merged values and the error chain of a cyclic include and finishes within
+seconds:
+
+```shell
+go run ./examples/include
+ ```
+
 ### Writing Config Files
 
 At times you may want to store all configuration modifications made during run
