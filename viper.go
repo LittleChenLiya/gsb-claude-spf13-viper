@@ -152,6 +152,12 @@ type Viper struct {
 
 	experimentalFinder     bool
 	experimentalBindStruct bool
+
+	// Resolved-reference cache and sensitivity registry used by GetExpanded.
+	// The cache is invalidated by every mutating operation.
+	expandCache       map[string]any
+	sensitivePaths    map[string]bool
+	maxReferenceDepth int
 }
 
 // New returns an initialized Viper instance.
@@ -171,6 +177,9 @@ func New() *Viper {
 	v.aliases = make(map[string]string)
 	v.typeByDefValue = false
 	v.logger = slog.New(&discardHandler{})
+	v.expandCache = make(map[string]any)
+	v.sensitivePaths = make(map[string]bool)
+	v.maxReferenceDepth = DefaultMaxReferenceDepth
 
 	codecRegistry := NewCodecRegistry()
 
@@ -1542,6 +1551,8 @@ func (v *Viper) SetDefault(key string, value any) {
 	key = v.realKey(strings.ToLower(key))
 	value = toCaseInsensitiveValue(value)
 
+	v.invalidateExpandCache()
+
 	path := strings.Split(key, v.keyDelim)
 	lastKey := strings.ToLower(path[len(path)-1])
 	deepestMap := deepSearch(v.defaults, path[0:len(path)-1])
@@ -1564,6 +1575,8 @@ func (v *Viper) Set(key string, value any) {
 	// If alias passed in, then set the proper override
 	key = v.realKey(strings.ToLower(key))
 	value = toCaseInsensitiveValue(value)
+
+	v.invalidateExpandCache()
 
 	path := strings.Split(key, v.keyDelim)
 	lastKey := strings.ToLower(path[len(path)-1])
@@ -1609,6 +1622,8 @@ func (v *Viper) ReadInConfig() error {
 	}
 
 	v.config = config
+	v.invalidateExpandCache()
+
 	return nil
 }
 
@@ -1650,6 +1665,7 @@ func (v *Viper) ReadConfig(in io.Reader) error {
 	}
 
 	v.config = config
+	v.invalidateExpandCache()
 
 	return nil
 }
@@ -1680,6 +1696,8 @@ func (v *Viper) MergeConfigMap(cfg map[string]any) error {
 	}
 	insensitiviseMap(cfg)
 	mergeMaps(cfg, v.config, nil)
+	v.invalidateExpandCache()
+
 	return nil
 }
 

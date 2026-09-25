@@ -547,6 +547,77 @@ returned instead.
 GetString("datastore.metric.host") // "0.0.0.0"
 ```
 
+### Configuration References
+
+Viper can expand references between configuration values. Reference expansion
+is an explicit, opt-in layer: plain `Get` (and the typed getters) return raw
+values untouched, while `GetExpanded` resolves references after the raw value
+has been selected using the standard precedence (override, flag, env, config
+file, key/value store, default).
+
+#### Syntax
+
+Inside a string value, `${path.to.key}` references another configuration key:
+
+```yaml
+host: localhost
+port: 8080
+url: http://${host}:${port}/api
+hobbies: [skateboarding, go]
+primary_hobby: ${hobbies}
+```
+
+```go
+url, err := v.GetExpanded("url")           // "http://localhost:8080/api"
+hobbies, err := v.GetExpanded("primary_hobby") // []any{"skateboarding", "go"}
+```
+
+Two forms are distinguished:
+
+- **Whole-value reference**: when the string consists of a single
+  `${path}` and nothing else, the referenced value is returned with its
+  original type preserved (a list stays a list, an int stays an int).
+- **Interpolation**: references embedded in a larger string are converted to
+  text and therefore only accept scalar values (strings, booleans, numbers).
+  Embedding a collection in a string is an error.
+
+Write `$${` to render a literal `${` (escaping). An unterminated `${`
+is treated as literal text.
+
+#### Errors and diagnostics
+
+Expansion failures are reported as structured errors implementing the
+`ReferenceError` interface:
+
+- `ReferenceCycleError` — a reference loop; `Chain` holds the closed loop
+  (e.g. `a -> b -> a`).
+- `ReferenceMissingError` — a reference to a key that does not exist.
+- `ReferenceNonScalarError` — a collection embedded in a string.
+- `ReferenceDepthError` — the chain exceeded the maximum expansion depth
+  (default 100, configurable via `SetMaxReferenceDepth`).
+
+Error values only ever contain key paths and the source layer a reference
+expression was found in — never configuration values — so they are safe to
+log.
+
+#### Sensitive paths
+
+Callers can mark paths as sensitive with `MarkSensitive`. Sensitivity
+propagates along the reference dependency chain: any key that directly or
+transitively references a sensitive path is flagged as sensitive in the
+`Sensitive` field of the structured errors, and diagnostics for such
+resolutions only report paths and sources.
+
+```go
+v.MarkSensitive("db.password")
+```
+
+#### Caching
+
+Resolved references are cached so each reference is resolved only once. The
+cache is invalidated automatically whenever a value changes (`Set`,
+`SetDefault`, `ReadInConfig`, `ReadConfig`, `MergeConfig`, ...).
+
 ### Configuration Subsets
 
 It's often useful to extract a subset of configuration (e.g., when developing a
