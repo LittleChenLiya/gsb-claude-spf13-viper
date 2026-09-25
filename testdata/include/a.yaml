@@ -1,0 +1,6 @@
+include:
+  - shared.yaml
+
+avalue: a
+ab: a
+order: a

@@ -152,6 +152,12 @@ type Viper struct {
 
 	experimentalFinder     bool
 	experimentalBindStruct bool
+
+	// Local include loader (opt-in, see [WithIncludes])
+	includesEnabled bool
+	includeKey      string
+	includeMaxDepth int
+	includeMaxFiles int
 }
 
 // New returns an initialized Viper instance.
@@ -170,6 +176,9 @@ func New() *Viper {
 	v.env = make(map[string][]string)
 	v.aliases = make(map[string]string)
 	v.typeByDefValue = false
+	v.includeKey = DefaultIncludeKey
+	v.includeMaxDepth = DefaultIncludeMaxDepth
+	v.includeMaxFiles = DefaultIncludeMaxFiles
 	v.logger = slog.New(&discardHandler{})
 
 	codecRegistry := NewCodecRegistry()
@@ -1601,6 +1610,19 @@ func (v *Viper) ReadInConfig() error {
 		return err
 	}
 
+	if v.includesEnabled {
+		config, err := v.readConfigWithIncludes(filename, file)
+		if err != nil {
+			// The configuration is left untouched: the file layer is
+			// only swapped in once it parsed successfully as a whole.
+			return err
+		}
+
+		v.config = config
+
+		return nil
+	}
+
 	config := make(map[string]any)
 
 	err = v.unmarshalReader(bytes.NewReader(file), config)
@@ -1630,6 +1652,15 @@ func (v *Viper) MergeInConfig() error {
 	file, err := afero.ReadFile(v.fs, filename)
 	if err != nil {
 		return err
+	}
+
+	if v.includesEnabled {
+		config, err := v.readConfigWithIncludes(filename, file)
+		if err != nil {
+			return err
+		}
+
+		return v.MergeConfigMap(config)
 	}
 
 	return v.MergeConfig(bytes.NewReader(file))
@@ -1808,6 +1839,32 @@ func (v *Viper) unmarshalReader(in io.Reader, c map[string]any) error {
 	}
 
 	insensitiviseMap(c)
+	return nil
+}
+
+// unmarshalBytes unmarshals a single configuration document of the given
+// format into the map c.
+func (v *Viper) unmarshalBytes(format string, b []byte, c map[string]any) error {
+	format = strings.ToLower(format)
+	if format == "" {
+		return errors.New("cannot decode configuration: unable to determine config type")
+	}
+
+	if !slices.Contains(SupportedExts, format) {
+		return UnsupportedConfigError(format)
+	}
+
+	decoder, err := v.decoderRegistry.Decoder(format)
+	if err != nil {
+		return ConfigParseError{err}
+	}
+
+	if err := decoder.Decode(b, c); err != nil {
+		return ConfigParseError{err}
+	}
+
+	insensitiviseMap(c)
+
 	return nil
 }
 

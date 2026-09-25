@@ -141,6 +141,57 @@ if err := viper.ReadInConfig(); err != nil {
 > specify the format programmatically, which is useful for files that naturally
 > have no extension (e.g., `.bashrc`).
 
+### Including Other Config Files
+
+A config file can pull in other local files by declaring an `include` list.
+The loader is opt-in: enable it with the `WithIncludes` option.
+
+    v := viper.NewWithOptions(viper.WithIncludes())
+    v.SetConfigFile("config/root.yaml")
+
+    if err := v.ReadInConfig(); err != nil {
+        // Errors carry the full include chain, e.g.:
+        // include chain /.../root.yaml -> /.../a.yaml -> /.../missing.yaml: ...
+        log.Fatal(err)
+    }
+
+    # config/root.yaml
+    include:
+      - a.yaml       # resolved relative to this file
+      - b.yaml
+
+    order: root      # the declaring file wins over its includes
+
+The rules of the loader:
+
+- Included files are merged first, in declaration order (later includes win
+  over earlier ones); the declaring file is merged last, so its values take
+  precedence. Environment variables, flags and `Set` keep their usual, higher
+  priority.
+- Relative paths are resolved against the file that declares them.
+- A file referenced by multiple siblings is read and parsed only once per
+  load; the next `ReadInConfig` reads it again, picking up new content.
+- A file that includes itself (directly or transitively) is reported as an
+  `IncludeCycleError` containing the full include chain.
+- The include key itself is consumed by the loader and never shows up in the
+  configuration.
+- The whole file layer is swapped in atomically: if any file in the include
+  graph fails to load, the previous configuration stays in place.
+
+The include key (default `include`, nested keys honor the configured key
+delimiter) and the safety limits can be customized:
+
+    v := viper.NewWithOptions(
+        viper.WithIncludes(),
+        viper.IncludeKey("imports"),     // config key holding the include list
+        viper.IncludeMaxDepth(8),        // default: 16 (root file counts as 1)
+        viper.IncludeMaxFiles(32),       // default: 64 files per load
+    )
+
+See `examples/include` for a runnable demo (merged values and a cycle chain):
+
+    go run ./examples/include
+
 ### Writing Config Files
 
 At times you may want to store all configuration modifications made during run

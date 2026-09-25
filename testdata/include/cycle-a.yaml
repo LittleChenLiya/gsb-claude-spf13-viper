@@ -1,0 +1,4 @@
+include:
+  - cycle-b.yaml
+
+value: cycle-a
