@@ -152,6 +152,14 @@ type Viper struct {
 
 	experimentalFinder     bool
 	experimentalBindStruct bool
+
+	// usage records the configuration keys that were read. It is nil unless
+	// usage tracking is enabled.
+	usage *usageTracker
+	// root points to the Viper a sub Viper inherits its tracker from.
+	root *Viper
+	// usagePrefix is the canonical (alias-resolved) path of a sub Viper.
+	usagePrefix []string
 }
 
 // New returns an initialized Viper instance.
@@ -713,6 +721,15 @@ func Get(key string) any { return v.Get(key) }
 //
 // Get returns an interface. For a specific value use one of the Get____ methods.
 func (v *Viper) Get(key string) any {
+	val := v.get(key)
+	v.trackRead(key, val)
+	return val
+}
+
+// get retrieves the value associated with the key without recording it as
+// used. It is shared by the public accessors via Get and by internal
+// diagnostic helpers that must not consume usage information.
+func (v *Viper) get(key string) any {
 	lcaseKey := strings.ToLower(key)
 	val := v.find(lcaseKey, true)
 	if val == nil {
@@ -769,14 +786,21 @@ func Sub(key string) *Viper { return v.Sub(key) }
 // Sub is case-insensitive for a key.
 func (v *Viper) Sub(key string) *Viper {
 	subv := New()
-	data := v.Get(key)
+	data := v.get(key)
 	if data == nil {
 		return nil
 	}
 
 	if reflect.TypeOf(data).Kind() == reflect.Map {
+		lcaseKey := strings.ToLower(key)
 		subv.parents = append([]string(nil), v.parents...)
-		subv.parents = append(subv.parents, strings.ToLower(key))
+		subv.parents = append(subv.parents, lcaseKey)
+		canonical := append([]string(nil), v.usagePath()...)
+		subv.usagePrefix = append(canonical, strings.Split(v.realKey(lcaseKey), v.keyDelim)...)
+		if tracker := v.usageRoot(); tracker != nil {
+			subv.usage = tracker
+			subv.root = v
+		}
 		subv.automaticEnvApplied = v.automaticEnvApplied
 		subv.envPrefix = v.envPrefix
 		subv.envKeyReplacer = v.envKeyReplacer
@@ -949,7 +973,8 @@ func UnmarshalKey(key string, rawVal any, opts ...DecoderConfigOption) error {
 
 // UnmarshalKey takes a single key and unmarshals it into a Struct.
 func (v *Viper) UnmarshalKey(key string, rawVal any, opts ...DecoderConfigOption) error {
-	return decode(v.Get(key), v.defaultDecoderConfig(rawVal, opts...))
+	val := v.get(key)
+	return v.decodeTracked(key, val, rawVal, opts...)
 }
 
 // Unmarshal unmarshals the config into a Struct. Make sure that the tags
@@ -974,7 +999,8 @@ func (v *Viper) Unmarshal(rawVal any, opts ...DecoderConfigOption) error {
 	}
 
 	// TODO: struct keys should be enough?
-	return decode(v.getSettings(keys), v.defaultDecoderConfig(rawVal, opts...))
+	settings := v.getSettings(keys)
+	return v.decodeTracked("", settings, rawVal, opts...)
 }
 
 func (v *Viper) decodeStructKeys(input any, opts ...DecoderConfigOption) ([]string, error) {
@@ -1054,6 +1080,38 @@ func decode(input any, config *mapstructure.DecoderConfig) error {
 	return decoder.Decode(input)
 }
 
+// decodeTracked decodes input into rawVal while, when usage tracking is
+// enabled, recording the configuration keys mapstructure actually consumed.
+// key is the path input was read from (empty for a full unmarshal).
+func (v *Viper) decodeTracked(key string, input any, rawVal any, opts ...DecoderConfigOption) error {
+	config := v.defaultDecoderConfig(rawVal, opts...)
+
+	tracker := v.usageRoot()
+	if tracker == nil {
+		return decode(input, config)
+	}
+
+	metadata := &mapstructure.Metadata{}
+	userMetadata := config.Metadata
+	config.Metadata = metadata
+
+	err := decode(input, config)
+
+	// A caller may have supplied its own metadata through an option; keep its
+	// record populated as if Viper had not touched the configuration.
+	if userMetadata != nil {
+		userMetadata.Keys = append(userMetadata.Keys, metadata.Keys...)
+		userMetadata.Unused = append(userMetadata.Unused, metadata.Unused...)
+		userMetadata.Unset = append(userMetadata.Unset, metadata.Unset...)
+	}
+
+	if err == nil {
+		v.trackUnmarshal(key, metadata, input, v.usageConfigLeaves())
+	}
+
+	return err
+}
+
 // UnmarshalExact unmarshals the config into a Struct, erroring if a field is nonexistent
 // in the destination struct.
 func UnmarshalExact(rawVal any, opts ...DecoderConfigOption) error {
@@ -1063,9 +1121,6 @@ func UnmarshalExact(rawVal any, opts ...DecoderConfigOption) error {
 // UnmarshalExact unmarshals the config into a Struct, erroring if a field is nonexistent
 // in the destination struct.
 func (v *Viper) UnmarshalExact(rawVal any, opts ...DecoderConfigOption) error {
-	config := v.defaultDecoderConfig(rawVal, opts...)
-	config.ErrorUnused = true
-
 	keys := v.AllKeys()
 
 	if v.experimentalBindStruct {
@@ -1078,8 +1133,14 @@ func (v *Viper) UnmarshalExact(rawVal any, opts ...DecoderConfigOption) error {
 		keys = append(keys, structKeys...)
 	}
 
-	// TODO: struct keys should be enough?
-	return decode(v.getSettings(keys), config)
+	settings := v.getSettings(keys)
+	exact := DecoderConfigOption(func(c *mapstructure.DecoderConfig) {
+		c.ErrorUnused = true
+	})
+	allOpts := make([]DecoderConfigOption, 0, len(opts)+1)
+	allOpts = append(allOpts, opts...)
+	allOpts = append(allOpts, exact)
+	return v.decodeTracked("", settings, rawVal, allOpts...)
 }
 
 // BindPFlags binds a full flag set to the configuration, using each flag's long
@@ -2058,7 +2119,7 @@ func (v *Viper) getSettings(keys []string) map[string]any {
 	m := map[string]any{}
 	// start from the list of keys, and construct the map one value at a time
 	for _, k := range keys {
-		value := v.Get(k)
+		value := v.get(k)
 		if value == nil {
 			// should not happen, since AllKeys() returns only keys holding a value,
 			// check just in case anything changes
