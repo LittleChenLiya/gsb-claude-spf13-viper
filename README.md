@@ -661,6 +661,40 @@ Viper uses
 under the hood for unmarshaling values which uses `mapstructure` tags, by
 default.
 
+### Tracking Unused Configuration Keys
+
+Viper can optionally keep track of which keys loaded from the configuration
+have actually been read. This is useful for surfacing typos in configuration
+files: a key present in the file but never consumed by the application shows up
+in the report.
+
+Tracking is opt-in:
+
+```go
+v := viper.NewWithOptions(viper.WithUsageTracking())
+
+// ... load the configuration and start the application ...
+
+for _, key := range v.UnusedKeys() {
+	fmt.Println("unused configuration key:", key)
+}
+```
+
+Keys are reported using Viper's own normalization (lower-case keys joined with
+the configured key delimiter) and alias rules. The following operations count
+as reads: `Get`, the typed getters (`GetString`, `GetInt`, `GetStringMap`,
+etc.), `Unmarshal`, `UnmarshalKey`, and `UnmarshalExact`. Reading a parent key
+consumes every key below it; when unmarshaling into a struct, only keys that
+map onto struct fields are consumed, so misspelled fields remain visible.
+`Sub` Vipers share the tracking state of their parent, and reads made on a Sub
+Viper are attributed to the corresponding parent keys.
+
+Diagnostic operations do not consume keys: `IsSet`, `InConfig`, `AllKeys`,
+`AllSettings`, `Debug`, and `UnusedKeys` itself leave the report unchanged. The
+report is sorted lexicographically, and `ResetUsage` clears the recorded reads
+without reloading the configuration. Tracking can also be controlled at
+runtime with `EnableUsageTracking` and `DisableUsageTracking`.
+
 ### Marshalling to String
 
 You may need to marshal all the settings held in Viper into a string. You can

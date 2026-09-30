@@ -150,6 +150,11 @@ type Viper struct {
 
 	decodeHook mapstructure.DecodeHookFunc
 
+	// usage records keys read through the public read APIs when tracking is
+	// enabled. It is shared with Sub Vipers and guarded by usageMu.
+	usage   *usage
+	usageMu sync.RWMutex
+
 	experimentalFinder     bool
 	experimentalBindStruct bool
 }
@@ -714,6 +719,14 @@ func Get(key string) any { return v.Get(key) }
 // Get returns an interface. For a specific value use one of the Get____ methods.
 func (v *Viper) Get(key string) any {
 	lcaseKey := strings.ToLower(key)
+	v.markUsage(lcaseKey)
+
+	return v.get(lcaseKey)
+}
+
+// get is the untracked implementation of Get. The key is expected to be
+// lower-cased already.
+func (v *Viper) get(lcaseKey string) any {
 	val := v.find(lcaseKey, true)
 	if val == nil {
 		return nil
@@ -769,19 +782,22 @@ func Sub(key string) *Viper { return v.Sub(key) }
 // Sub is case-insensitive for a key.
 func (v *Viper) Sub(key string) *Viper {
 	subv := New()
-	data := v.Get(key)
+	lcaseKey := strings.ToLower(key)
+	data := v.get(lcaseKey)
 	if data == nil {
 		return nil
 	}
 
 	if reflect.TypeOf(data).Kind() == reflect.Map {
-		subv.parents = append([]string(nil), v.parents...)
-		subv.parents = append(subv.parents, strings.ToLower(key))
+		subv.parents = append(append([]string(nil), v.parents...), v.realKey(lcaseKey))
 		subv.automaticEnvApplied = v.automaticEnvApplied
 		subv.envPrefix = v.envPrefix
 		subv.envKeyReplacer = v.envKeyReplacer
 		subv.keyDelim = v.keyDelim
 		subv.config = cast.ToStringMap(data)
+		v.usageMu.RLock()
+		subv.usage = v.usage
+		v.usageMu.RUnlock()
 		return subv
 	}
 	return nil
@@ -949,7 +965,24 @@ func UnmarshalKey(key string, rawVal any, opts ...DecoderConfigOption) error {
 
 // UnmarshalKey takes a single key and unmarshals it into a Struct.
 func (v *Viper) UnmarshalKey(key string, rawVal any, opts ...DecoderConfigOption) error {
-	return decode(v.Get(key), v.defaultDecoderConfig(rawVal, opts...))
+	lcaseKey := strings.ToLower(key)
+	config := v.defaultDecoderConfig(rawVal, opts...)
+
+	var metadata *mapstructure.Metadata
+	if config.Metadata == nil {
+		metadata = &mapstructure.Metadata{}
+		config.Metadata = metadata
+	} else {
+		metadata = config.Metadata
+	}
+
+	if err := decode(v.get(v.realKey(lcaseKey)), config); err != nil {
+		return err
+	}
+
+	v.markUnmarshalUsage(lcaseKey, rawVal, metadata)
+
+	return nil
 }
 
 // Unmarshal unmarshals the config into a Struct. Make sure that the tags
@@ -961,6 +994,16 @@ func Unmarshal(rawVal any, opts ...DecoderConfigOption) error {
 // Unmarshal unmarshals the config into a Struct. Make sure that the tags
 // on the fields of the structure are properly set.
 func (v *Viper) Unmarshal(rawVal any, opts ...DecoderConfigOption) error {
+	config := v.defaultDecoderConfig(rawVal, opts...)
+
+	var metadata *mapstructure.Metadata
+	if config.Metadata == nil {
+		metadata = &mapstructure.Metadata{}
+		config.Metadata = metadata
+	} else {
+		metadata = config.Metadata
+	}
+
 	keys := v.AllKeys()
 
 	if v.experimentalBindStruct {
@@ -974,7 +1017,13 @@ func (v *Viper) Unmarshal(rawVal any, opts ...DecoderConfigOption) error {
 	}
 
 	// TODO: struct keys should be enough?
-	return decode(v.getSettings(keys), v.defaultDecoderConfig(rawVal, opts...))
+	if err := decode(v.getSettings(keys), config); err != nil {
+		return err
+	}
+
+	v.markUnmarshalUsage("", rawVal, metadata)
+
+	return nil
 }
 
 func (v *Viper) decodeStructKeys(input any, opts ...DecoderConfigOption) ([]string, error) {
@@ -1066,6 +1115,14 @@ func (v *Viper) UnmarshalExact(rawVal any, opts ...DecoderConfigOption) error {
 	config := v.defaultDecoderConfig(rawVal, opts...)
 	config.ErrorUnused = true
 
+	var metadata *mapstructure.Metadata
+	if config.Metadata == nil {
+		metadata = &mapstructure.Metadata{}
+		config.Metadata = metadata
+	} else {
+		metadata = config.Metadata
+	}
+
 	keys := v.AllKeys()
 
 	if v.experimentalBindStruct {
@@ -1079,7 +1136,13 @@ func (v *Viper) UnmarshalExact(rawVal any, opts ...DecoderConfigOption) error {
 	}
 
 	// TODO: struct keys should be enough?
-	return decode(v.getSettings(keys), config)
+	if err := decode(v.getSettings(keys), config); err != nil {
+		return err
+	}
+
+	v.markUnmarshalUsage("", rawVal, metadata)
+
+	return nil
 }
 
 // BindPFlags binds a full flag set to the configuration, using each flag's long
@@ -2058,7 +2121,7 @@ func (v *Viper) getSettings(keys []string) map[string]any {
 	m := map[string]any{}
 	// start from the list of keys, and construct the map one value at a time
 	for _, k := range keys {
-		value := v.Get(k)
+		value := v.get(strings.ToLower(k))
 		if value == nil {
 			// should not happen, since AllKeys() returns only keys holding a value,
 			// check just in case anything changes
