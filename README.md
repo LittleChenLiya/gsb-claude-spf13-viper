@@ -692,6 +692,86 @@ Read more in [this blog
 post](https://sagikazarmark.hu/blog/decoding-custom-formats-with-viper/).
 
 
+## Debugging Configuration
+
+When debugging configuration, it is useful to compare two effective
+configurations and see which layer each value comes from. The `Snapshot` type
+records read-only snapshots of the default, file, env, and override layers and
+computes the difference between two snapshots. The diff is pure computation: it
+never re-reads the environment and never triggers config watchers.
+
+```go
+before := viper.NewSnapshot()
+before.RecordLayer(viper.LayerFile, map[string]any{"port": 1})
+
+after := viper.NewSnapshot()
+after.RecordLayer(viper.LayerFile, map[string]any{"port": 1})
+after.RecordLayer(viper.LayerEnv, map[string]any{"port": 2})
+
+for _, change := range before.Diff(after) {
+    fmt.Println(change)
+}
+// Output: port: 1 -> 2 (source: file -> env)
+```
+
+The layer precedence follows Viper's rules: `override > env > file > default`.
+Keys are normalized (lower-cased, aliases resolved) and nested paths are handled
+the same way as actual reads.
+
+### Distinguishing missing, null, and empty string
+
+A key present with a `nil` value is reported as present (null); a key set to an
+empty string is reported as present with an empty value; a key absent from every
+layer is reported as not present. The diagnostic format renders these as
+`<nil>`, ``, and `<missing>` respectively.
+
+```go
+s := viper.NewSnapshot()
+s.RecordLayer(viper.LayerFile, map[string]any{"feature": nil, "greeting": ""})
+
+s.Effective("feature")  // Value{Layer: file, Value: nil, Present: true}
+s.Effective("greeting") // Value{Layer: file, Value: "",  Present: true}
+s.Effective("absent")   // Value{Layer: default, Value: nil, Present: false}
+```
+
+### Sensitive keys
+
+Keys marked as sensitive report only the change and the source layers; their
+values are never exported.
+
+```go
+before := viper.NewSnapshot(viper.WithSensitiveKeys("password"))
+before.RecordLayer(viper.LayerFile, map[string]any{"password": "secret1"})
+
+after := viper.NewSnapshot(viper.WithSensitiveKeys("password"))
+after.RecordLayer(viper.LayerEnv, map[string]any{"password": "secret2"})
+
+for _, change := range before.Diff(after) {
+    fmt.Println(change)
+}
+// Output: password: changed (source: file -> env)
+```
+
+### Diagnostic format
+
+Each change renders as a single line:
+
+- Normal keys: `key: old -> new (source: oldlayer -> newlayer)`
+- Sensitive keys: `key: changed (source: oldlayer -> newlayer)`
+
+Missing values render as `<missing>`, null values as `<nil>`, and everything
+else renders with `%v`. The source is one of `default`, `file`, `env`,
+`override`, or `<missing>` when the key is absent.
+
+### Running the tests
+
+The targeted test command for this feature is:
+
+```sh
+go test -run 'TestSnapshot' -count=1 .
+```
+
+
 ## FAQ
 
 ### Why is it called “Viper”?
