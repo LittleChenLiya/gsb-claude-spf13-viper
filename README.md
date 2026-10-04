@@ -692,6 +692,107 @@ Read more in [this blog
 post](https://sagikazarmark.hu/blog/decoding-custom-formats-with-viper/).
 
 
+## Layer tracing and diffing
+
+When debugging configuration it is often useful to compare two valid
+configuration sets and to understand which **layer** each effective value
+comes from. Viper can capture a read-only snapshot of the four supported
+layers (`default`, `file`, `env`, `override`) and diff two such snapshots.
+
+Merge priority follows the usual Viper rules
+(`override > env > file > default`), key normalization (lower-casing, aliases)
+and nested-path handling match a normal `Get()`, and a snapshot comparison
+never re-reads the environment or configuration files and never triggers
+config watchers.
+
+```go
+snap := v.LayerSnapshot() // capture defaults, file, env and explicit Set() values
+
+// Per-key provenance:
+trace := snap.Trace("port")
+fmt.Println(trace.Effective)        // env
+fmt.Println(trace.EffectiveValue)   // "2"
+fmt.Println(trace.TraceString())    // port: set="2" [effective: env; layers: ...]
+
+// Compare two snapshots:
+report := before.Diff(after)
+fmt.Println(report.String())
+```
+
+Snapshots can also be built directly from layer maps, which is handy for
+tests and fixtures:
+
+```go
+snap := viper.NewSnapshot(
+    defaults,                       // map[string]any
+    fileValues,                     // map[string]any (nested maps)
+    envValues,                      // map[string]any (flat canonical keys)
+    overrides,                      // map[string]any
+    viper.SnapshotAliases(map[string]string{"user": "username"}),
+)
+```
+
+### Presence: missing, null and empty string
+
+The snapshot API keeps three states apart that `Get()` collapses:
+
+- `PresenceMissing` — the key does not exist in the layer,
+- `PresenceNull` — the key exists with a `nil` value (lower layers still win),
+- `PresenceEmpty` — the key exists with an empty string `""` (a real value
+  that shadows lower-priority layers),
+- `PresenceSet` — the key exists with any other value.
+
+Empty strings are never mistaken for missing keys. Empty environment variables
+follow `AllowEmptyEnv` semantics (use `SnapshotAllowEmptyEnv(true)` to treat
+them as present).
+
+### Sensitive keys
+
+Keys marked sensitive (via `DiffSensitiveKeys`, `DiffSensitiveMatcher`, or the
+built-in heuristic matching `password`, `secret`, `token`, `api-key`, ...) are
+never exported with their values. The report only states whether they changed
+and which layers supplied the before/after values; presence is reported as
+`redacted`.
+
+```go
+report := before.Diff(after, viper.DiffSensitiveKeys("password", "db.token"))
+```
+
+### Diagnostic format
+
+`DiffReport.String()` groups keys into `changed:` and `unchanged:` sections.
+Each line has the shape:
+
+```text
+<key>: <before-layer>(<before-presence>[=<before-value>]) -> <after-layer>(<after-presence>[=<after-value>]) [effective: <before-layer> -> <after-layer>]
+```
+
+Example:
+
+```text
+changed:
+  port: file(set=1) -> env(set="2") [effective: file -> env]
+  password: override(redacted) -> env(redacted) [effective: override -> env] [sensitive]
+unchanged:
+  host: file(set="localhost")
+```
+
+- Presence values: `missing`, `null`, `empty`, `set`, `redacted`.
+- String values are quoted; other values use their default Go representation.
+- Sensitive lines never contain values and end with `[sensitive]`.
+
+A single key trace uses `TraceString()`:
+
+```text
+port: set="2" [effective: env; layers: default(missing) file(set=1) env(set="2") override(missing)]
+```
+
+### Running the focused tests
+
+```shell
+go test -run 'TestDiffFileToEnv|TestDiffSensitivePassword|TestEmptyValuesAreNotMissing|TestEmptyEnvFallsBackUnlessAllowed|TestSnapshotAliasesCaseInsensitive|TestNestedOverride|TestSnapshotInputsAreNotMutated|TestLayerSnapshotDoesNotRereadEnv|TestLayerSnapshotFileToEnv|TestTraceStringDiagnostic|TestNestedSensitiveKeyAndBoundEnv|TestMissingToMissingIsUnchanged' -v .
+```
+
 ## FAQ
 
 ### Why is it called “Viper”?
