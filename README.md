@@ -547,6 +547,36 @@ returned instead.
 GetString("datastore.metric.host") // "0.0.0.0"
 ```
 
+### Getting a Value with its Origin
+
+`GetWithOrigin` returns the effective value (identical to what `Get` returns),
+the configuration layer that actually supplied it, and whether the key exists.
+The origin is recorded while the value is looked up, so it is not inferred by
+scanning the merged `AllSettings` map afterwards.
+
+```go
+val, origin, exists := viper.GetWithOrigin("server.port")
+// val    -> the effective value
+// origin -> one of: OriginAbsent, OriginDefault, OriginKVStore,
+//           OriginConfig, OriginEnv, OriginFlag, OriginOverride
+// exists -> false only when the key is set in no layer
+```
+
+This is useful when the same key can be provided by several layers and you need
+to know which one won. Nested shadowing is reported against the layer that
+causes it: for example, if the config file defines `a.b.c` but an override sets
+`a.b` to a scalar, `GetWithOrigin("a.b.c")` returns a nil value with
+`OriginOverride`, because the override parent replaces the nested key.
+
+For sensitive values (passwords, tokens, keys), pass `WithSensitive()` to
+withhold the actual value while still reporting existence and origin:
+
+```go
+val, origin, exists := viper.GetWithOrigin("db.password", viper.WithSensitive())
+// val == nil, but exists and origin still tell you whether (and where) the
+// secret is configured.
+```
+
 ### Configuration Subsets
 
 It's often useful to extract a subset of configuration (e.g., when developing a
