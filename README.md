@@ -692,6 +692,82 @@ Read more in [this blog
 post](https://sagikazarmark.hu/blog/decoding-custom-formats-with-viper/).
 
 
+## Validating Candidate Configuration Snapshots
+
+Sometimes a configuration change must be validated before it becomes the
+active configuration. Viper supports this with an explicit, one-shot
+validation pipeline built on `Candidate`, `SnapshotView` and `Pipeline`.
+
+A `Candidate` parses candidate bytes **exactly once**, on an isolated scratch
+Viper instance that shares the target's codec registry but none of its live
+state. Parse errors are returned from `NewCandidate` and never touch the
+active configuration:
+
+```go
+candidate, err := viper.NewCandidate(
+    v,
+    bytes.NewReader(newConfigBytes),
+    viper.WithCandidateConfigType("yaml"),
+)
+if err != nil {
+    // The active configuration is unchanged.
+    return err
+}
+```
+
+Validators are independent functions that only receive a `SnapshotView`:
+a read-only, deep-copied view of the parsed snapshot. A view never consults
+the current environment — no environment variables, bound flags, overrides,
+defaults, remote stores or files are visible — and it is immutable, including
+nested maps and slices; values returned from its getters are defensive copies.
+
+```go
+pipeline := viper.NewPipeline(candidate).
+    RegisterFunc("port", func(ctx context.Context, view viper.SnapshotView) error {
+        port := view.GetInt("server.port")
+        if port <= 0 || port > 65535 {
+            return fmt.Errorf("server.port %d out of range", port)
+        }
+        return nil
+    }).
+    RegisterFunc("tls", func(ctx context.Context, view viper.SnapshotView) error {
+        if view.GetString("server.host") == "" && view.GetBool("server.tls.enabled") {
+            return errors.New("tls requires a host")
+        }
+        return nil
+    })
+
+report := pipeline.Run(ctx)
+```
+
+### Validation and publish contract
+
+- Validators run **in parallel**, but `Report.Results` is always aggregated in
+  **registration order**, regardless of the order they finish in.
+- The candidate is handed off for publication **only when every validator
+  passes**. If any validator fails, the publisher is not called and the active
+  Viper values stay unchanged.
+- If the context is canceled before all validators settle, no publication
+  happens — a validator that returns success afterwards is a *late success*
+  and is ignored (`report.Canceled == true`, publish count 0).
+- Validation errors never modify the active Viper.
+- Publication is a single, explicit hand-off. The default publisher calls
+  `candidate.Publish()`, which atomically replaces the target's config-file
+  layer (overrides, flags, env, defaults and remote stores keep their
+  precedence). Use `viper.WithPublisher` to intercept the hand-off.
+- The pipeline is **not** connected to file watching: `WatchConfig`/
+  `OnConfigChange` reloads never validate or publish a candidate
+  automatically. Callers must create the candidate and call `Run`/`Publish`
+  explicitly.
+
+```go
+report := pipeline.Run(ctx)
+if !report.OK() {
+    return errors.Join(report.FailedErrors()...) // active config untouched
+}
+// The default publisher has already called candidate.Publish() exactly once.
+```
+
 ## FAQ
 
 ### Why is it called “Viper”?
