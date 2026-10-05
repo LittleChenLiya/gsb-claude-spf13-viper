@@ -547,6 +547,64 @@ returned instead.
 GetString("datastore.metric.host") // "0.0.0.0"
 ```
 
+### Finding Where a Value Comes From
+
+Besides the effective value, `GetWithOrigin` reports which layer actually
+provided it. It performs the exact same lookup as `Get`, so the returned value
+and the origin always agree. The origin is recorded while the sources are
+walked once in priority order; it is **not** reconstructed by scanning the
+result of `AllSettings`.
+
+Possible origins are, in priority order: `override` (`Set`), `flag`
+(command line flags), `env` (environment variables), `file` (configuration
+file), `kvstore` (remote key/value store) and `default` (`SetDefault`). A key
+that is not set anywhere returns an empty origin (`""`) with `exists ==
+false`.
+
+```go
+v.SetDefault("server.host", "localhost")
+
+value, origin, exists := v.GetWithOrigin("server.host")
+// value  == "localhost"
+// origin == viper.SourceFile // or viper.SourceDefault, viper.SourceEnv, ...
+// exists == true
+```
+
+Aliases follow the same rules as with `Get`: the alias is resolved to its
+real key first and the reported origin is the origin of that real key.
+
+When a non-map value set on a higher-priority parent key replaces an entire
+nested subtree, child keys are no longer reachable. `Get` returns `nil` for
+them, while `GetWithOrigin` additionally reports the origin of the parent
+value that replaced the subtree (`exists` stays `false`), so the deciding
+layer can be located:
+
+```go
+// file: {"server": {"host": "config-host"}}
+v.Set("server", "replaced")
+
+_, origin, exists := v.GetWithOrigin("server.host")
+// origin == viper.SourceOverride // the "server" override hides the child
+// exists == false
+```
+
+Environment variables that are set but empty are ignored by default (for
+backward compatibility), so the lookup falls through to lower-priority layers
+and the origin is not `env`. Calling `AllowEmptyEnv(true)` changes this
+policy: empty environment variables then count as real values, win as
+`viper.SourceEnv` (with `""` as the value) and lower layers are no longer
+consulted.
+
+For sensitive keys (passwords, tokens, ...) use the `GetSensitive` option:
+the lookup still happens exactly once and existence plus origin are reported,
+but the value itself is never returned so it cannot leak into logs or other
+output:
+
+```go
+_, origin, exists := v.GetWithOrigin("database.password", viper.GetSensitive())
+// value is nil, origin/exists still accurate
+```
+
 ### Configuration Subsets
 
 It's often useful to extract a subset of configuration (e.g., when developing a

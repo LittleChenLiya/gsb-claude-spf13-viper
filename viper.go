@@ -719,43 +719,51 @@ func (v *Viper) Get(key string) any {
 		return nil
 	}
 
-	if v.typeByDefValue {
-		// TODO(bep) this branch isn't covered by a single test.
-		valType := val
-		path := strings.Split(lcaseKey, v.keyDelim)
-		defVal := v.searchMap(v.defaults, path)
-		if defVal != nil {
-			valType = defVal
-		}
+	return v.coerceByDefaultValue(lcaseKey, val)
+}
 
-		switch valType.(type) {
-		case bool:
-			return cast.ToBool(val)
-		case string:
-			return cast.ToString(val)
-		case int32, int16, int8, int:
-			return cast.ToInt(val)
-		case uint:
-			return cast.ToUint(val)
-		case uint32:
-			return cast.ToUint32(val)
-		case uint64:
-			return cast.ToUint64(val)
-		case int64:
-			return cast.ToInt64(val)
-		case float64, float32:
-			return cast.ToFloat64(val)
-		case time.Time:
-			return cast.ToTime(val)
-		case time.Duration:
-			return cast.ToDuration(val)
-		case []string:
-			return cast.ToStringSlice(val)
-		case []int:
-			return cast.ToIntSlice(val)
-		case []time.Duration:
-			return cast.ToDurationSlice(val)
-		}
+// coerceByDefaultValue infers the value type from the key's default value
+// (when SetTypeByDefaultValue is enabled). It is shared by Get and
+// GetWithOrigin so both always return the exact same effective value.
+func (v *Viper) coerceByDefaultValue(lcaseKey string, val any) any {
+	if !v.typeByDefValue {
+		return val
+	}
+
+	valType := val
+	path := strings.Split(lcaseKey, v.keyDelim)
+	defVal := v.searchMap(v.defaults, path)
+	if defVal != nil {
+		valType = defVal
+	}
+
+	switch valType.(type) {
+	case bool:
+		return cast.ToBool(val)
+	case string:
+		return cast.ToString(val)
+	case int32, int16, int8, int:
+		return cast.ToInt(val)
+	case uint:
+		return cast.ToUint(val)
+	case uint32:
+		return cast.ToUint32(val)
+	case uint64:
+		return cast.ToUint64(val)
+	case int64:
+		return cast.ToInt64(val)
+	case float64, float32:
+		return cast.ToFloat64(val)
+	case time.Time:
+		return cast.ToTime(val)
+	case time.Duration:
+		return cast.ToDuration(val)
+	case []string:
+		return cast.ToStringSlice(val)
+	case []int:
+		return cast.ToIntSlice(val)
+	case []time.Duration:
+		return cast.ToDurationSlice(val)
 	}
 
 	return val
@@ -1192,80 +1200,56 @@ func (v *Viper) MustBindEnv(input ...string) {
 //
 // Note: this assumes a lower-cased key given.
 func (v *Viper) find(lcaseKey string, flagDefault bool) any {
+	val, _, _ := v.findWithOrigin(lcaseKey, flagDefault)
+	return val
+}
+
+// findWithOrigin is the single layered lookup behind find, Get and
+// GetWithOrigin.
+//
+// It walks every layer exactly once in priority order and returns the winning
+// value together with the Source it came from, instead of deriving the origin
+// from the merged settings. A key that is not reachable in any layer reports
+// exists == false with an empty Source. When a nested key is shadowed by a
+// non-map parent value from a higher-priority layer, the lookup short
+// circuits and reports that layer as the origin with exists == false: the
+// parent value has replaced the whole subtree, so no lower-priority layer can
+// contribute.
+//
+// Note: this assumes a lower-cased key given.
+func (v *Viper) findWithOrigin(lcaseKey string, flagDefault bool) (val any, origin Source, exists bool) {
 	var (
-		val    any
-		exists bool
 		path   = strings.Split(lcaseKey, v.keyDelim)
 		nested = len(path) > 1
 	)
 
 	// compute the path through the nested maps to the nested value
 	if nested && v.isPathShadowedInDeepMap(path, castMapStringToMapInterface(v.aliases)) != "" {
-		return nil
+		return nil, "", false
 	}
 
-	// if the requested key is an alias, then return the proper key
+	// if the requested key is an alias, then resolve it and follow the
+	// aliased key's lookup rules (same sources, same priority).
 	lcaseKey = v.realKey(lcaseKey)
 	path = strings.Split(lcaseKey, v.keyDelim)
 	nested = len(path) > 1
 
 	// Set() override first
-	val = v.searchMap(v.override, path)
-	if val != nil {
-		return val
+	if val = v.searchMap(v.override, path); val != nil {
+		return val, SourceOverride, true
 	}
 	if nested && v.isPathShadowedInDeepMap(path, v.override) != "" {
-		return nil
+		// The whole subtree is replaced by a non-map override value.
+		return nil, SourceOverride, false
 	}
 
 	// PFlag override next
-	flag, exists := v.pflags[lcaseKey]
-	if exists && flag.HasChanged() {
-		switch flag.ValueType() {
-		case "int", "int8", "int16", "int32", "int64":
-			return cast.ToInt(flag.ValueString())
-		case "bool":
-			return cast.ToBool(flag.ValueString())
-		case "stringSlice", "stringArray":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return res
-		case "boolSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToBoolSlice(res)
-		case "intSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToIntSlice(res)
-		case "uintSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToUintSlice(res)
-		case "float64Slice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToFloat64Slice(res)
-		case "durationSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			slice := strings.Split(s, ",")
-			return cast.ToDurationSlice(slice)
-		case "stringToString":
-			return stringToStringConv(flag.ValueString())
-		case "stringToInt":
-			return stringToIntConv(flag.ValueString())
-		default:
-			return flag.ValueString()
-		}
+	if flag, flagExists := v.pflags[lcaseKey]; flagExists && flag.HasChanged() {
+		return v.flagValue(flag), SourceFlag, true
 	}
 	if nested && v.isPathShadowedInFlatMap(path, v.pflags) != "" {
-		return nil
+		// The whole subtree is replaced by a bound flag value.
+		return nil, SourceFlag, false
 	}
 
 	// Env override next
@@ -1273,103 +1257,110 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) any {
 		envKey := strings.Join(append(v.parents, lcaseKey), ".")
 		// even if it hasn't been registered, if automaticEnv is used,
 		// check any Get request
-		if val, ok := v.getEnv(v.mergeWithEnvPrefix(envKey)); ok {
-			return val
+		if envVal, ok := v.getEnv(v.mergeWithEnvPrefix(envKey)); ok {
+			return envVal, SourceEnv, true
 		}
 		if nested && v.isPathShadowedInAutoEnv(path) != "" {
-			return nil
+			// The whole subtree is replaced by an automatic env value.
+			return nil, SourceEnv, false
 		}
 	}
-	envkeys, exists := v.env[lcaseKey]
-	if exists {
+	if envkeys, envBound := v.env[lcaseKey]; envBound {
 		for _, envkey := range envkeys {
-			if val, ok := v.getEnv(envkey); ok {
-				return val
+			if envVal, ok := v.getEnv(envkey); ok {
+				return envVal, SourceEnv, true
 			}
 		}
 	}
 	if nested && v.isPathShadowedInFlatMap(path, v.env) != "" {
-		return nil
+		// The whole subtree is replaced by a bound env value.
+		return nil, SourceEnv, false
 	}
 
 	// Config file next
-	val = v.searchIndexableWithPathPrefixes(v.config, path)
-	if val != nil {
-		return val
+	if val = v.searchIndexableWithPathPrefixes(v.config, path); val != nil {
+		return val, SourceFile, true
 	}
 	if nested && v.isPathShadowedInDeepMap(path, v.config) != "" {
-		return nil
+		// The whole subtree is replaced by a non-map file value.
+		return nil, SourceFile, false
 	}
 
 	// K/V store next
-	val = v.searchMap(v.kvstore, path)
-	if val != nil {
-		return val
+	if val = v.searchMap(v.kvstore, path); val != nil {
+		return val, SourceKVPStore, true
 	}
 	if nested && v.isPathShadowedInDeepMap(path, v.kvstore) != "" {
-		return nil
+		// The whole subtree is replaced by a non-map KV store value.
+		return nil, SourceKVPStore, false
 	}
 
 	// Default next
-	val = v.searchMap(v.defaults, path)
-	if val != nil {
-		return val
+	if val = v.searchMap(v.defaults, path); val != nil {
+		return val, SourceDefault, true
 	}
 	if nested && v.isPathShadowedInDeepMap(path, v.defaults) != "" {
-		return nil
+		// The whole subtree is replaced by a non-map default value.
+		return nil, SourceDefault, false
 	}
 
 	if flagDefault {
 		// last chance: if no value is found and a flag does exist for the key,
 		// get the flag's default value even if the flag's value has not been set.
-		if flag, exists := v.pflags[lcaseKey]; exists {
-			switch flag.ValueType() {
-			case "int", "int8", "int16", "int32", "int64":
-				return cast.ToInt(flag.ValueString())
-			case "bool":
-				return cast.ToBool(flag.ValueString())
-			case "stringSlice", "stringArray":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return res
-			case "boolSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToBoolSlice(res)
-			case "intSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToIntSlice(res)
-			case "uintSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToUintSlice(res)
-			case "float64Slice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToFloat64Slice(res)
-			case "stringToString":
-				return stringToStringConv(flag.ValueString())
-			case "stringToInt":
-				return stringToIntConv(flag.ValueString())
-			case "durationSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				slice := strings.Split(s, ",")
-				return cast.ToDurationSlice(slice)
-			default:
-				return flag.ValueString()
-			}
+		if flag, flagExists := v.pflags[lcaseKey]; flagExists {
+			return v.flagValue(flag), SourceFlag, true
 		}
 		// last item, no need to check shadowing
 	}
 
-	return nil
+	return nil, "", false
+}
+
+// flagValue converts a bound flag's string representation into the typed
+// value Get would have returned for it.
+func (v *Viper) flagValue(flag FlagValue) any {
+	switch flag.ValueType() {
+	case "int", "int8", "int16", "int32", "int64":
+		return cast.ToInt(flag.ValueString())
+	case "bool":
+		return cast.ToBool(flag.ValueString())
+	case "stringSlice", "stringArray":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return res
+	case "boolSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToBoolSlice(res)
+	case "intSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToIntSlice(res)
+	case "uintSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToUintSlice(res)
+	case "float64Slice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToFloat64Slice(res)
+	case "durationSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		slice := strings.Split(s, ",")
+		return cast.ToDurationSlice(slice)
+	case "stringToString":
+		return stringToStringConv(flag.ValueString())
+	case "stringToInt":
+		return stringToIntConv(flag.ValueString())
+	default:
+		return flag.ValueString()
+	}
 }
 
 func readAsCSV(val string) ([]string, error) {
